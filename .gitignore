@@ -1,0 +1,19 @@
+# Secrets & credentials
+.env
+credentials.json
+token.json
+
+# Temporary files
+.tmp/
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Claude memory
+.claude/
