@@ -12,6 +12,7 @@ Usage:
 import argparse
 import json
 import os
+import re
 import sys
 from datetime import datetime
 
@@ -45,11 +46,57 @@ from search_social_media import search_all_platforms, format_results as format_s
 DEFAULT_LIMIT = 5
 MAX_LIMIT = 10
 
-# Search query templates per type
+# ── Phone number detection ────────────────────────────────────────────────────
+
+_PHONE_RE = re.compile(r"^[\+\(]?\d[\d\s\-\.\(\)]{6,}\d$")
+
+
+def _is_phone_number(query: str) -> bool:
+    """Return True if the query looks like a phone number."""
+    digits = re.sub(r"\D", "", query)
+    return 7 <= len(digits) <= 15 and bool(_PHONE_RE.match(query.strip()))
+
+
+def _normalize_phone(query: str) -> tuple[str, str]:
+    """Return (digits_only, formatted XXX-XXX-XXXX)."""
+    digits = re.sub(r"\D", "", query)
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    formatted = f"{digits[:3]}-{digits[3:6]}-{digits[6:]}" if len(digits) == 10 else digits
+    return digits, formatted
+
+
+def _build_phone_lookup_urls(query: str) -> list:
+    """Direct reverse phone lookup URLs — bypasses DDG for known-working sites.
+
+    Ordering:
+      1. TruePeopleSearch / FastPeopleSearch / USPhonebook — owner name + address
+         (Cloudflare-protected; go direct to Playwright, no proxy)
+      2. 800notes / CallerInfo — crowd-sourced caller ID; no bot protection,
+         plain requests work reliably
+    """
+    digits, formatted = _normalize_phone(query)
+    return [
+        f"https://www.truepeoplesearch.com/results?phoneno={digits}",
+        f"https://www.fastpeoplesearch.com/phone/{formatted}",
+        f"https://www.usphonebook.com/{formatted}",
+        f"https://800notes.com/Phone.aspx/1-{formatted}",
+        f"https://www.callerinfo.com/number/{formatted}",
+    ]
+
+
+# ── Search query templates per type ──────────────────────────────────────────
+
 CONTACT_QUERIES = [
     "{query} phone number address",
     "{query} contact information",
     "{query} official website",
+]
+
+PHONE_QUERIES = [
+    '"{query}" reverse phone lookup name',
+    '"{query}" whitepages OR truepeoplesearch OR fastpeoplesearch',
+    '"{query}" who called',
 ]
 
 PERSON_QUERIES = [
@@ -132,12 +179,25 @@ def ddg_search(query: str, max_results: int = 10) -> list:
 
 def collect_urls(search_type: str, query: str, limit: int) -> list:
     """Run multiple queries and collect unique URLs to scrape."""
-    templates = CONTACT_QUERIES if search_type == "contact" else PERSON_QUERIES
     seen_urls = set()
     all_results = []
 
+    # Phone number query — inject direct reverse-lookup URLs and use phone templates
+    if _is_phone_number(query):
+        phone_urls = _build_phone_lookup_urls(query)
+        print(f"  [phone lookup: {len(phone_urls)} direct URLs queued]", file=sys.stderr)
+        for url in phone_urls:
+            if url not in seen_urls:
+                seen_urls.add(url)
+                all_results.append({"title": "", "url": url, "snippet": ""})
+        templates = PHONE_QUERIES
+    elif search_type == "contact":
+        templates = CONTACT_QUERIES
+    else:
+        templates = PERSON_QUERIES
+
     # For person searches, inject direct directory URLs at the front if ScraperAPI is set
-    if search_type == "person" and os.environ.get("SCRAPER_API_KEY"):
+    if search_type == "person" and not _is_phone_number(query) and os.environ.get("SCRAPER_API_KEY"):
         first, last, city, state = _parse_name_and_state(query)
         if first and last:
             dir_urls = _build_directory_urls(first, last, state)
@@ -164,7 +224,8 @@ def collect_urls(search_type: str, query: str, limit: int) -> list:
     snippet_contacts = _contacts_from_snippets(all_results)
 
     _dir_domains = {"whitepages.com", "spokeo.com", "truepeoplesearch.com",
-                    "fastpeoplesearch.com", "radaris.com", "peekyou.com"}
+                    "fastpeoplesearch.com", "radaris.com", "peekyou.com",
+                    "usphonebook.com", "800notes.com", "callerinfo.com"}
     dir_hits = [r for r in all_results if any(d in r["url"] for d in _dir_domains)]
     other_hits = [r for r in all_results if r not in dir_hits]
     # Always include all directory hits; fill remaining slots with other results
@@ -258,6 +319,114 @@ def save_to_file(content: str, output_path: str) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     with open(output_path, "a", encoding="utf-8") as f:
         f.write(content + "\n")
+
+
+def _phone_api_lookup(query: str) -> dict | None:
+    """Try registered phone lookup APIs in order of preference.
+
+    Checks for these keys in .env:
+      NUMVERIFY_API_KEY       — apilayer.net NumVerify (100 free/month)
+      ABSTRACT_PHONE_API_KEY  — abstractapi.com phone validation (250 free/month)
+      OPENCNAM_SID + OPENCNAM_AUTH_TOKEN — opencnam.com CNAM lookup (~$0.004/call)
+
+    Returns a dict with the fields we care about, or None if no key is set
+    or all calls fail.
+    """
+    sys.path.insert(0, os.path.dirname(__file__))
+    from http_client import fetch_api
+
+    digits, formatted = _normalize_phone(query)
+    e164 = f"+1{digits}" if len(digits) == 10 else f"+{digits}"
+
+    # ── NumVerify ────────────────────────────────────────────────────────────
+    numverify_key = os.environ.get("NUMVERIFY_API_KEY", "")
+    if numverify_key:
+        print("  [API: NumVerify]", file=sys.stderr)
+        try:
+            resp = fetch_api(
+                "http://apilayer.net/api/validate",
+                params={"access_key": numverify_key, "number": e164,
+                        "country_code": "US", "format": "1"},
+                timeout=10,
+            )
+            data = resp.json()
+            if data.get("valid"):
+                return {
+                    "source": "NumVerify",
+                    "number": data.get("international_format", formatted),
+                    "name": data.get("caller_name") or "",
+                    "line_type": data.get("line_type", ""),
+                    "carrier": data.get("carrier", ""),
+                    "location": f"{data.get('location', '')}, {data.get('country_name', '')}".strip(", "),
+                }
+        except Exception as e:
+            print(f"  [NumVerify error: {e}]", file=sys.stderr)
+
+    # ── AbstractAPI ──────────────────────────────────────────────────────────
+    abstract_key = os.environ.get("ABSTRACT_PHONE_API_KEY", "")
+    if abstract_key:
+        print("  [API: AbstractAPI]", file=sys.stderr)
+        try:
+            resp = fetch_api(
+                "https://phonevalidation.abstractapi.com/v1/",
+                params={"api_key": abstract_key, "phone": e164},
+                timeout=10,
+            )
+            data = resp.json()
+            if data.get("valid"):
+                return {
+                    "source": "AbstractAPI",
+                    "number": data.get("format", {}).get("international", formatted),
+                    "name": data.get("carrier", {}).get("name", ""),
+                    "line_type": data.get("type", ""),
+                    "carrier": data.get("carrier", {}).get("name", ""),
+                    "location": data.get("location", ""),
+                }
+        except Exception as e:
+            print(f"  [AbstractAPI error: {e}]", file=sys.stderr)
+
+    # ── OpenCNAM ─────────────────────────────────────────────────────────────
+    opencnam_sid = os.environ.get("OPENCNAM_SID", "")
+    opencnam_token = os.environ.get("OPENCNAM_AUTH_TOKEN", "")
+    if opencnam_sid and opencnam_token:
+        print("  [API: OpenCNAM]", file=sys.stderr)
+        try:
+            resp = fetch_api(
+                f"https://api.opencnam.com/v3/phone/{e164}",
+                params={"format": "json", "account_sid": opencnam_sid,
+                        "auth_token": opencnam_token},
+                timeout=10,
+            )
+            data = resp.json()
+            name = data.get("name", "")
+            if name:
+                return {
+                    "source": "OpenCNAM",
+                    "number": formatted,
+                    "name": name,
+                    "line_type": "",
+                    "carrier": "",
+                    "location": "",
+                }
+        except Exception as e:
+            print(f"  [OpenCNAM error: {e}]", file=sys.stderr)
+
+    return None
+
+
+def _format_phone_api_result(result: dict) -> str:
+    """Format a phone API lookup result for display."""
+    lines = [f"[Phone API: {result['source']}]"]
+    lines.append(f"  Number:    {result['number']}")
+    if result.get("name"):
+        lines.append(f"  Name:      {result['name']}")
+    if result.get("carrier"):
+        lines.append(f"  Carrier:   {result['carrier']}")
+    if result.get("line_type"):
+        lines.append(f"  Line type: {result['line_type']}")
+    if result.get("location"):
+        lines.append(f"  Location:  {result['location']}")
+    return "\n".join(lines)
 
 
 def _print_help():
@@ -365,6 +534,14 @@ def main():
     print(f"Searching ({args.type}): {args.query!r}  [{ts}]")
     print(f"Fetching up to {limit} pages…\n")
 
+    # ── Phone API lookup (instant, no scraping needed) ────────────────────
+    phone_api_result = None
+    if _is_phone_number(args.query):
+        phone_api_result = _phone_api_lookup(args.query)
+        if phone_api_result:
+            print(_format_phone_api_result(phone_api_result))
+            print()
+
     hits, snippet_contacts = collect_urls(args.type, args.query, limit)
 
     if not hits:
@@ -422,6 +599,8 @@ def main():
 
     header = f"=== {args.type.upper()} SEARCH: {args.query!r} | {ts} ===\n"
     body = format_merged(merged, args.query, args.type)
+    if phone_api_result:
+        body = _format_phone_api_result(phone_api_result) + "\n\n" + body
     if social_body:
         body += "\n\nSOCIAL MEDIA:\n" + social_body
     output = header + body + "\n"

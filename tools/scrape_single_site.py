@@ -36,11 +36,13 @@ from extract_patterns import (
 )
 from http_client import fetch, _request_with_retry, get_headers
 
-# Domains that reliably require a proxy to return useful data
+# Domains that reliably require a proxy to return useful data.
+# NOTE: truepeoplesearch.com, fastpeoplesearch.com, usphonebook.com are NOT
+# listed here — Scrape.do returns 400 for them. They go straight to
+# requests → Playwright instead.
 _PROXY_DOMAINS = {
     "whitepages.com", "spokeo.com", "beenverified.com", "intelius.com",
     "peoplefinder.com", "peoplefinders.com", "mylife.com", "radaris.com",
-    "fastpeoplesearch.com", "truepeoplesearch.com", "usphonebook.com",
     "zabasearch.com", "addresses.com", "anywho.com", "yellowpages.com",
     "peekyou.com", "clustrmaps.com", "idcrawl.com",
 }
