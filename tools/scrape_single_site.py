@@ -34,17 +34,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from extract_patterns import (
     extract_phones, extract_emails, extract_addresses, extract_from_jsonld
 )
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-}
-TIMEOUT = 30  # ScraperAPI can be slower
+from http_client import fetch, _request_with_retry, get_headers
 
 # Domains that reliably require a proxy to return useful data
 _PROXY_DOMAINS = {
@@ -63,21 +53,21 @@ def _needs_proxy(url: str) -> bool:
     return any(host == d or host.endswith("." + d) for d in _PROXY_DOMAINS)
 
 
-def fetch_page(url: str) -> tuple[str, str]:
-    """Returns (html_text, final_url). Uses ScraperAPI when key is set."""
-    api_key = os.environ.get("SCRAPER_API_KEY", "")
+def _proxy_fetch(url: str) -> tuple[str, str]:
+    """Fetch via ScraperAPI or Scrape.do with retry. Called by http_client.fetch()."""
+    scraper_api_key = os.environ.get("SCRAPER_API_KEY", "")
+    scrape_do_token = os.environ.get("SCRAPE_DO_TOKEN", "")
 
     # Domains that need JS rendering (costs more credits — use sparingly)
     _JS_DOMAINS = {"radaris.com", "spokeo.com"}
+    host = urlparse(url).netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    needs_js = any(host == d or host.endswith("." + d) for d in _JS_DOMAINS)
 
-    if api_key and _needs_proxy(url):
-        host = urlparse(url).netloc.lower()
-        if host.startswith("www."):
-            host = host[4:]
-        needs_js = any(host == d or host.endswith("." + d) for d in _JS_DOMAINS)
-        api_url = "http://api.scraperapi.com/"
+    if scraper_api_key:
         params = {
-            "api_key": api_key,
+            "api_key": scraper_api_key,
             "url": url,
             "country_code": "us",
         }
@@ -85,12 +75,49 @@ def fetch_page(url: str) -> tuple[str, str]:
             params["render"] = "true"
         mode = "proxy+JS" if needs_js else "proxy"
         print(f"  [{mode}: ScraperAPI → {urlparse(url).netloc}]", file=sys.stderr)
-        resp = requests.get(api_url, params=params, timeout=60)
-    else:
-        resp = requests.get(url, headers=HEADERS, timeout=TIMEOUT, allow_redirects=True)
+        resp = _request_with_retry(
+            "http://api.scraperapi.com/", params=params, timeout=60,
+        )
+        return resp.text, url
 
-    resp.raise_for_status()
-    return resp.text, url
+    if scrape_do_token:
+        params = {
+            "token": scrape_do_token,
+            "url": url,
+            "geoCode": "us",
+        }
+        if needs_js:
+            params["render"] = "true"
+        mode = "proxy+JS" if needs_js else "proxy"
+        print(f"  [{mode}: Scrape.do → {urlparse(url).netloc}]", file=sys.stderr)
+        resp = _request_with_retry(
+            "https://api.scrape.do", params=params, timeout=60,
+        )
+        return resp.text, url
+
+    # No proxy key set
+    print(
+        f"  [WARNING: {urlparse(url).netloc} needs a proxy but no key is set. "
+        "Set SCRAPER_API_KEY or SCRAPE_DO_TOKEN in .env]",
+        file=sys.stderr,
+    )
+    raise RuntimeError(f"No proxy key set for {urlparse(url).netloc}")
+
+
+def fetch_page(url: str) -> tuple[str, str]:
+    """Returns (html_text, final_url). Routes through proxy, requests, or
+    Playwright depending on domain and content quality."""
+    result = fetch(
+        url,
+        use_proxy_fn=_needs_proxy,
+        proxy_fetch_fn=_proxy_fetch,
+    )
+    if result.content_diagnosis.is_thin:
+        print(
+            f"  [WARNING: thin content — {result.content_diagnosis.detail}]",
+            file=sys.stderr,
+        )
+    return result.html, result.final_url
 
 
 def scrape(url: str) -> dict:
@@ -249,7 +276,69 @@ def save_to_file(content: str, output_path: str) -> None:
         f.write(content + "\n")
 
 
+def _print_help():
+    print("""
+scrape_single_site.py — Scrape a single URL and extract contact information
+════════════════════════════════════════════════════════════════════════════
+
+USAGE
+  python scrape_single_site.py --url "https://..." [options]
+
+ARGUMENTS
+
+  --url URL         (required)
+      The full URL of the page to scrape.
+      Example: "https://www.example.com/contact"
+
+  --output FILE
+      Append extracted results to this file path. If omitted, output is
+      printed to the terminal only (not auto-saved).
+
+  --json
+      Output raw JSON instead of formatted text. Useful for piping into
+      other tools or scripts.
+
+WHAT IT EXTRACTS
+  - Phone numbers (US and international formats)
+  - Fax numbers
+  - Email addresses
+  - Physical addresses
+  - Social media profile links (LinkedIn, Twitter, Instagram, etc.)
+  - Business/organization name (from JSON-LD, og:title, or <title>)
+
+HOW IT WORKS
+  1. Fetches the page (uses ScraperAPI proxy if SCRAPER_API_KEY is set
+     and the domain is a known people-finder site)
+  2. Parses JSON-LD structured data (most reliable)
+  3. Scans meta tags, mailto: and tel: links
+  4. Finds social media links in the page
+  5. Falls back to regex extraction on visible text
+
+EXAMPLES
+
+  # Scrape a contact page
+  python scrape_single_site.py --url "https://www.acmecorp.com/contact"
+
+  # Scrape and save results to a file
+  python scrape_single_site.py --url "https://www.acmecorp.com/contact" --output .tmp/acme.txt
+
+  # Get raw JSON output
+  python scrape_single_site.py --url "https://www.acmecorp.com/contact" --json
+
+NOTE
+  For people-finder sites (Whitepages, Spokeo, Radaris, etc.), set a
+  scraping proxy key in .env to bypass blocks:
+    SCRAPER_API_KEY  — ScraperAPI (takes priority if both are set)
+    SCRAPE_DO_TOKEN  — Scrape.do (used when ScraperAPI key is absent)
+  Without either key, these sites will likely return empty results.
+""")
+
+
 def main():
+    if "/help" in sys.argv:
+        _print_help()
+        sys.exit(0)
+
     parser = argparse.ArgumentParser(description="Scrape a URL for contact info")
     parser.add_argument("--url", required=True, help="URL to scrape")
     parser.add_argument("--output", default="", help="Append results to this file")

@@ -260,11 +260,94 @@ def save_to_file(content: str, output_path: str) -> None:
         f.write(content + "\n")
 
 
+def _print_help():
+    print("""
+search_and_scrape.py — Search the web for person or business contact info
+══════════════════════════════════════════════════════════════════════════
+
+USAGE
+  python search_and_scrape.py --query "..." [options]
+
+ARGUMENTS
+
+  --query TEXT              (required)
+      What to search for. Can be a person's name, username, email address,
+      or business name.
+      Examples:
+        "John Smith software engineer Austin TX"
+        "jsmith92"
+        "Acme Corp Denver CO"
+
+  --type {contact,person}   (default: contact)
+      Search mode:
+        contact  — Find phone, address, and email for a business or org
+        person   — Find social profiles and contact info for an individual
+
+  --mode {name,username}    (default: name)
+      How to interpret the query for social media searches:
+        name      — Treat query as a person's full name
+        username  — Treat query as a social media handle or username
+
+  --limit N                 (default: 5, max: 10)
+      Number of web pages to scrape. Higher = slower but more thorough.
+
+  --output FILE
+      Append results to this file path. If omitted, results auto-save
+      to .tmp/ with a timestamped filename.
+
+  --json
+      Output raw JSON instead of formatted text. Useful for piping into
+      other tools or scripts.
+
+  --no-social
+      Skip the social media platform search step.
+      Only applies when --type is 'person'.
+
+  --social-platforms PLATFORM [PLATFORM ...]
+      Which social platforms to search. Defaults to all major platforms.
+      Available: instagram tiktok facebook twitter linkedin github youtube
+                 reddit pinterest snapchat
+
+EXAMPLES
+
+  # Find contact info for a business
+  python search_and_scrape.py --query "Acme Corp Denver CO" --type contact
+
+  # Find a person by full name
+  python search_and_scrape.py --query "John Smith Austin TX" --type person
+
+  # Find a person by username/handle across social platforms
+  python search_and_scrape.py --query "jsmith92" --type person --mode username
+
+  # Narrow to specific platforms only
+  python search_and_scrape.py --query "Jane Doe" --type person --social-platforms instagram tiktok linkedin
+
+  # Save results to a specific file
+  python search_and_scrape.py --query "Acme Corp" --type contact --output .tmp/acme.txt
+
+  # Output raw JSON
+  python search_and_scrape.py --query "John Smith" --type person --json
+
+  # Scrape more pages for thorough results
+  python search_and_scrape.py --query "Jane Doe Boise ID" --type person --limit 10
+
+NOTE
+  Results are always auto-saved to .tmp/ even without --output.
+  Social media results also generate an HTML report in .tmp/.
+""")
+
+
 def main():
+    if "/help" in sys.argv:
+        _print_help()
+        sys.exit(0)
+
     parser = argparse.ArgumentParser(description="Search and scrape for contact/person info")
     parser.add_argument("--query", required=True, help="Search query (name, email, username, business)")
     parser.add_argument("--type", choices=["contact", "person"], default="contact",
                         help="Search mode: 'contact' for businesses, 'person' for individuals")
+    parser.add_argument("--mode", choices=["name", "username"], default="name",
+                        help="How to interpret the query for social search: 'name' or 'username'")
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT,
                         help=f"Max pages to scrape (default {DEFAULT_LIMIT}, max {MAX_LIMIT})")
     parser.add_argument("--output", default="", help="Append results to this file")
@@ -326,7 +409,7 @@ def main():
         social_results = search_all_platforms(
             name=args.query,
             platforms=args.social_platforms,
-            mode="name",
+            mode=args.mode,
         )
         social_body = format_social(social_results, args.query)
         print(social_body)

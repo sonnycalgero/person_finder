@@ -40,6 +40,7 @@ except ImportError:
 
 sys.path.insert(0, os.path.dirname(__file__))
 from extract_patterns import extract_emails, extract_phones
+from http_client import fetch_api
 
 try:
     from generate_social_html import generate_html, save_html as _save_html
@@ -160,9 +161,7 @@ def _lookup_tiktok_username(username: str, key: str, host: str, schema: dict) ->
         headers = _rapidapi_headers(key, host)
         url = schema["userinfo_url"]
         params = schema["userinfo_params"](username)
-        resp = requests.get(url, headers=headers, params=params, timeout=RAPIDAPI_TIMEOUT)
-        if resp.status_code not in (200,):
-            return {}
+        resp = fetch_api(url, headers=headers, params=params, timeout=RAPIDAPI_TIMEOUT)
         data = resp.json()
         user = schema["userinfo_path"](data)
         if not user or not user.get("uniqueId"):
@@ -216,8 +215,9 @@ def search_tiktok_api(query: str, mode: str = "name") -> list:
         # Quick probe
         try:
             headers = _rapidapi_headers(key, host)
-            r = requests.get(schema["userinfo_url"], headers=headers,
-                             params=schema["userinfo_params"]("tiktok"), timeout=10)
+            r = fetch_api(schema["userinfo_url"], headers=headers,
+                         params=schema["userinfo_params"]("tiktok"),
+                         timeout=10, max_retries=1)
             if r.status_code == 200:
                 working_host = host
                 working_schema = schema
@@ -646,7 +646,89 @@ def save_to_file(content: str, output_path: str) -> None:
         f.write(content + "\n")
 
 
+def _print_help():
+    platform_list = "\n      ".join(
+        f"{k:12} — {v['label']}  ({v['domain']})"
+        for k, v in PLATFORMS.items()
+    )
+    default_list = "  ".join(DEFAULT_PLATFORMS)
+    print(f"""
+search_social_media.py — Search social media platforms for a person or username
+════════════════════════════════════════════════════════════════════════════════
+
+USAGE
+  python search_social_media.py --query "..." [options]
+
+ARGUMENTS
+
+  --query TEXT              (required)
+      The name or username to search for.
+      Examples:
+        "Jane Smith"
+        "Jane Smith Boise ID"
+        "janesmith92"
+
+  --mode {{name,username}}    (default: name)
+      How to interpret the query:
+        name      — Search for a person by their full name
+        username  — Search for a specific handle/username across platforms
+                    (more precise; skips bio matching)
+
+  --context TEXT
+      Optional extra context to narrow name searches. Not used in
+      username mode.
+      Examples: "Boise ID"  |  "software engineer"  |  "UCLA"
+
+  --platforms PLATFORM [PLATFORM ...]   (default: all major platforms)
+      Which platforms to search. Pass 'all' to include every platform.
+      Default: {default_list}
+
+      Available platforms:
+      {platform_list}
+
+  --output FILE
+      Append results to this file path. If omitted, results auto-save
+      to .tmp/ with a timestamped filename.
+
+WHAT IT PRODUCES
+  - Text results printed to terminal and saved to .tmp/
+  - An HTML report with profile cards saved to .tmp/ (auto-opens on Mac)
+  - TikTok results include follower counts, bio, and verified status
+    when RAPIDAPI_KEY is set in .env
+
+EXAMPLES
+
+  # Search for a person by full name
+  python search_social_media.py --query "Jane Smith"
+
+  # Narrow with location context
+  python search_social_media.py --query "Jane Smith" --context "Boise ID"
+
+  # Search for a specific username
+  python search_social_media.py --query "janesmith92" --mode username
+
+  # Search only selected platforms
+  python search_social_media.py --query "Jane Smith" --platforms instagram tiktok linkedin
+
+  # Search every platform
+  python search_social_media.py --query "Jane Smith" --platforms all
+
+  # Save results to a specific file
+  python search_social_media.py --query "Jane Smith" --output .tmp/jane_smith.txt
+
+ENV VARIABLES (.env)
+  RAPIDAPI_KEY            — Enables real-time TikTok profile lookup with
+                            follower counts, bios, and verified status
+  RAPIDAPI_TIKTOK_HOST    — TikTok RapidAPI host (default: tiktok-api23.p.rapidapi.com)
+  SCRAPER_API_KEY         — Proxy for people-finder sites (Whitepages, Spokeo, etc.)
+""")
+
+
 def main():
+    if "/help" in sys.argv:
+        _print_help()
+        sys.exit(0)
+
     parser = argparse.ArgumentParser(description="Search social media platforms for a person or username")
     parser.add_argument("--query", required=True,
                         help="Person name (e.g. 'Jane Smith') or username (e.g. 'jsmith92')")

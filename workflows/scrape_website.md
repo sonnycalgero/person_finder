@@ -42,9 +42,16 @@ Extract all contact information (phone, email, address, name) from a specific UR
    ```
 
 ## Edge Cases
-- **403/bot block**: The site blocks scrapers. Note this to the user and suggest they visit manually.
-- **JS-heavy sites**: BeautifulSoup can't execute JavaScript. If a page returns minimal HTML, the actual content may be loaded by JS — note this and try a different URL (like `/contact`).
+- **403/bot block**: The tool has a three-tier fetch pipeline:
+  1. **Proxy** (ScraperAPI / Scrape.do) — for known bot-protected domains (Whitepages, Spokeo, etc.)
+  2. **Direct requests** — for open sites, with rotated User-Agent headers
+  3. **Playwright + stealth** — auto-escalation when the first two return thin/blocked content
+  If a page returns a Cloudflare challenge, CAPTCHA, homepage redirect, or fewer than 200 characters of visible text, the tool detects this and escalates to a stealth Chromium browser automatically. Look for `[WARNING: thin content — ...]` or `[escalating to Playwright]` in stderr.
+- **JS-heavy sites**: For known JS-heavy domains (Radaris, Spokeo), the proxy enables JS rendering automatically. For other sites that return empty shells, Playwright handles JS rendering locally (no proxy credits consumed).
 - **Multiple locations**: Some businesses list many addresses. Report the first 3 and note if more exist.
+- **Proxy provider priority**: `SCRAPER_API_KEY` (ScraperAPI) takes precedence. If absent, `SCRAPE_DO_TOKEN` (Scrape.do) is used. Both are optional — open sites always fetch directly with no credits consumed.
+- **Retry on transient errors**: All HTTP requests (proxy, direct, API) automatically retry up to 3 times with exponential backoff (2s, 4s, 8s) on 502, 503, 429, and connection errors.
+- **Playwright not installed**: If `playwright` and `playwright-stealth` aren't installed, everything works as before — the browser escalation path is simply skipped. To install: `pip install playwright playwright-stealth && playwright install chromium`.
 
 ## Output Format
 Results are auto-saved to `.tmp/<name>_<timestamp>.txt` unless `--output` is specified.

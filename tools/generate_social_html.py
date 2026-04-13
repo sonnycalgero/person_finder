@@ -18,6 +18,13 @@ try:
 except ImportError:
     pass
 
+sys.path.insert(0, os.path.dirname(__file__))
+try:
+    from http_client import fetch_api
+    _HAS_HTTP_CLIENT = True
+except ImportError:
+    _HAS_HTTP_CLIENT = False
+
 # ── Platform styling ───────────────────────────────────────────────────────
 PLATFORM_STYLES = {
     "Instagram": {
@@ -89,19 +96,13 @@ _DEFAULT_STYLE = {
     "gradient": "linear-gradient(135deg, #555, #888)",
 }
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    )
-}
-
-
 def fetch_og_image(url: str) -> str:
     """Try to get og:image from a profile URL. Returns image URL or ''."""
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=8, allow_redirects=True)
+        if _HAS_HTTP_CLIENT:
+            resp = fetch_api(url, timeout=8, max_retries=1)
+        else:
+            resp = requests.get(url, timeout=8, allow_redirects=True)
         if resp.status_code != 200:
             return ""
         soup = BeautifulSoup(resp.text, "html.parser")
