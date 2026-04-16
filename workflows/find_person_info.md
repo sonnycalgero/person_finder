@@ -48,7 +48,38 @@ If the scraper finds LinkedIn, Twitter/X, GitHub, etc.:
 python tools/scrape_single_site.py --url "<profile URL>"
 ```
 
-### Step 3 — For email reverse-lookup
+### Step 3 — DeHashed breach database lookup (enrichment)
+
+Run DeHashed to surface emails, usernames, passwords, and IPs linked to the subject.
+Field type is auto-detected — pass `--field` to override.
+
+```bash
+# By name
+python tools/dehashed_search.py --query "John Smith" --size 20
+
+# By email
+python tools/dehashed_search.py --query "jsmith@company.com"
+
+# By username
+python tools/dehashed_search.py --query "jsmith92"
+
+# By domain (returns all breach entries for that email domain)
+python tools/dehashed_search.py --query "company.com" --field domain --size 50
+
+# By IP address
+python tools/dehashed_search.py --query "192.0.2.1"
+
+# By phone number
+python tools/dehashed_search.py --query "555-867-5309"
+```
+
+Cross-reference any new emails/usernames found here against social platforms (Step 1).
+
+**Note:** DeHashed charges credits per query. For common names, use `--size 10` first to
+gauge volume before fetching more. Results include database source so you can assess
+recency and reliability.
+
+### Step 4 — For email reverse-lookup (web)
 Search for the exact quoted email string:
 ```bash
 python tools/search_and_scrape.py --query '"jsmith@company.com"' --type person
@@ -58,7 +89,7 @@ Also search the username part separately:
 python tools/search_and_scrape.py --query '"jsmith" site:linkedin.com OR site:github.com' --type person
 ```
 
-### Step 4 — Group by likely individual
+### Step 5 — Group by likely individual
 When multiple people share a name, group them by:
 - Consistent location across profiles
 - Same employer mentioned in multiple sources
@@ -72,7 +103,7 @@ Label groups clearly:
 [Ungrouped] — profiles that couldn't be assigned
 ```
 
-### Step 5 — Present concise results
+### Step 6 — Present concise results
 ```
 [Jane Smith — Group A (Austin, TX)]
   Email:   jane@example.com  (medium)
@@ -102,7 +133,7 @@ Label groups clearly:
 - **Username-only**: Search the username across LinkedIn, GitHub, Twitter, Instagram in separate queries.
 - **No results**: Check spelling. Try first name + last initial. Try email username part only.
 
-## Step 6 — Write Summary File (Required)
+## Step 7 — Write Summary File (Required)
 
 After all searches are complete, always create a human-readable summary file:
 
@@ -130,6 +161,9 @@ Date: YYYY-MM-DD
 
 [SOCIAL MEDIA]
   Platform:  handle / URL
+
+[BREACH DATA (DeHashed)]
+  Databases found in / passwords (hashed or plain) / linked emails or usernames
 
 [PROFESSIONAL]
   Title, employer, profile URLs
